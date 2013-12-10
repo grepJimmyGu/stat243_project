@@ -1,0 +1,346 @@
+\documentclass{article}
+
+\begin{document}
+
+<<hprime>>=
+x<-runif(1)
+h<-function(x){log(dnorm(x))}
+h_prime<-function(h, x, ...){
+  x = x
+  h_prime<-diag(attr(numericDeriv(quote(h(x, ...)),"x"),"gradient"))
+  if(all(diff(h_prime) <= 0)) {return(h_prime)}
+  else {stop("The density function is not log-concaved!")}
+}
+
+diag(attributes(numericDeriv(quote(log(dnorm(x))), "x"))$gradient)
+
+# Successful case
+h_prime(dnorm, seq(0.0001, 5, by = 0.25), log = 1)
+h_prime(dnorm, seq(0.0001, 5, by = 0.25), mean = 4, sd = 2, log = 1)
+h_prime(dchisq, seq(0.0001, 1, by = 0.025), df = 10 ,log = 1)
+h_prime(dgamma, seq(0.0001, 1, by = 0.025), shape = 5 ,log = 1)
+# Failed case
+h_prime(dexp, seq(0.0001, 1, by = 0.025))
+
+@
+Basically, '...' allows us to pass on extra parameters or options to the density function. Also, we have included a test part here to check the log-concativity based the monotone property of h_prime
+
+
+<<makez>>=
+
+make_z <- function(x, fx, fpx, left_bound, right_bound) {
+  k <- length(x)
+  xm1 <- c(0, x)
+  fxm1 <- c(0, fx)
+  fpxm1 <- c(0, fpx)
+  x <- c(x, 0)
+  fx <- c(fx, 0)
+  fpx <- c(fpx, 0)
+  
+  z <- (fx - fxm1 - x*fpx + xm1*fpxm1) / (fpxm1 - fpx)
+  z[1] <- left_bound
+  z[k+1] <- right_bound
+  
+  return (z)
+}
+
+set.seed(0)
+x <- sort(rnorm(100))
+fx <- dnorm(x, log = 1)
+fpx <- hpx(dnorm, x, log = 1)
+plot(x, fx, type = "p", pch = 16)
+points(make_z(x, fx, fpx, -12, 12), dnorm(make_z(x, fx, fpx, -12, 12),log = 1), pch = 17, col = "red")
+legend("topright", c("log-normal plot", "make_z generation plot"), pch = c(16, 17))
+
+@
+Since z is just the point from the density function(in this case, lognormal), so we can just plot two set of points together to see if they fall into the same distribution trend. 
+
+
+<<makeupper/lowerbound>>=
+make_upper_bound <- function(x, hx, hpx, z) {
+  upper_bound <- function(xx) {
+    index <- rowSums(outer(xx, z, function(x1,x2) x1>x2))
+    index[index==0] <- 1
+    index[index==length(z)] <- length(z) - 1
+    ux <- hx[index] + (xx-x[index])*hpx[index]
+    return (ux)
+  }
+  return(upper_bound)
+}
+
+make_lower_bound <- function(x, hx, left_bound, right_bound) {
+  x <- c(left_bound, x, right_bound)
+  hx <- c(-Inf, hx, -Inf)
+  lower_bound <- function(xx) {
+    k=length(x)
+    index <- rowSums(outer(xx, x, function(x1,x2) x1>x2))
+    index[index==0] <- 1
+    index[index==k] <- k - 1
+    lx <- ((x[index+1]-xx)*hx[index] + (xx-x[index])*hx[index+1])/(x[index+1]-x[index])
+    lx[index %in% c(1,k-1)] <- -Inf
+    return(lx)
+  }
+  return(lower_bound)
+}
+
+# Test 1
+set.seed(0)
+x <- runif(100)
+hx <- dnorm(x, log = 1)
+hpx <- hpx(dnorm, x, log = 1)
+z <- make_z(x,hx,hpx,-12.0, 12.0)
+lower <- make_lower_bound(x, hx, -12.0, 12.0)
+upper <- make_upper_bound(x, hx, hpx, z)
+xx <- seq(-5, 5, by=0.1)
+# This shows that all lower bound should less than upper bound by our generation
+all((lower(xx) < upper(xx)) == TRUE)
+
+#Test 2
+# Now we use -x^2 as a function to plot upper and lower bound 
+x <- seq(-10.5, 10.5, by=4)
+# Notice here we need to define a function and input the name of this function
+f<-function(x){-x^2}
+fpx <- hpx(f,x)
+z <- make_z(x,f(x),fpx,-Inf, Inf)
+lower <- make_lower_bound(x, f(x), -Inf, Inf)
+upper <- make_upper_bound(x, f(x), fpx, z)
+xx <- seq(-10, 10, by=0.2)
+plot(xx, -xx^2, type='l')
+lines(xx, lower(xx), lty = 2)
+lines(xx, upper(xx), lty = 6)
+legend("topright", c("upper_bound", "lower_bound"), lty = c(6,2))
+@
+In test 1, we basically just check if the corresponding lower bound is less than upper bound, and it turns out this is true. Then we tried to plot our upper/lower bound using previous function we defined: $h(x)$ $make_z$. And we use a logconcave
+function $f(x)=x^2$, and it turns out the plot is gorgeous.
+
+<<sampleupperbound>>=
+sample_upper_bound <- function(m, x, hx, hpx, z) {
+  k <- length(x)
+  #Calcualte the normalized integration of upper_bound funtion at each linear interval
+  factor1 <- exp(hx - x*hpx) 
+  factor2 <- (exp(c(0, hpx) * z)[2:(k+1)] - exp(hpx*z[1:k])) / hpx
+  I <- factor1 * factor2
+  Inormalize <- sum(I)
+  
+  intervalcdf <- cumsum(I)
+  sample <- runif(m, min=0, max=Inormalize)
+  #calculate which interval the sample falls into
+  sample_interval <- sapply(sample, function(t) sum(intervalcdf<t)) + 1
+  t <- sample - c(0, intervalcdf)[sample_interval]
+  
+  sample_x <- inversecdf(t, sample_interval, factor1, hpx, z)
+  return (sample_x)
+}
+
+inversecdf <- function(t, j, factor1, hpx, z) {
+  return ( log(t/factor1[j]*hpx[j] + exp(hpx[j]*z[j])) / hpx[j] )
+}
+
+set.seed(0)
+x <- seq(-10.5, 10.5, by=4)
+# Notice here we need to define a function and input the name of this function
+f<-function(x){-x^2}
+fpx <- hpx(f,x)
+z <- make_z(x,f(x),fpx,-Inf, Inf)
+lower <- make_lower_bound(x, f(x), -Inf, Inf)
+upper <- make_upper_bound(x, f(x), fpx, z)
+xx <- seq(-10, 10, by=0.2)
+hist(sample_upper_bound(101, x, f(x), fpx, z), freq = )
+lines(xx, upper(xx), type = "l")
+plot(xx, upper(xx) + 50, type = "l")
+
+@
+Here, I have some problems. I kind of want to visualize the sample points in the density graph, but I failed to do that, we can talk about this tomorrow.
+
+
+<<filter>>=
+#Function filer takes in the cand generated from sample_upper_bound and return the accepted sample and update point. 
+#If all the cand are accepted, the update value is NA
+#If no cand is accepted, the accepted value is NA
+
+filter <- function(cand, lower_bound, upper_bound){
+  w <- runif(n = length(cand)) # Should use value from script
+  squeeze <- lower_bound(cand) - upper_bound(cand)
+  
+  # Gives NA if the all is accepted
+  i <- which(log(w) > squeeze)[1]
+  
+  if (is.na(i)) {
+    return(list(accepted=cand, update=NA))
+  } 
+  else{
+    if (i==1) {
+      return(list(accepted=NA, update=cand[i]))
+    }
+    else {
+      return(list(accepted=cand[1:(i-1)], update=cand[i]))
+    }
+  }
+}
+
+# Test function
+set.seed(0)
+f <- dnorm
+n <- 10
+x <- sort(rnorm(7))
+left_bound   <- -10
+right_bound  <- 10
+hx <- log(f(x))
+hpx <- h_prime(hx, x)
+sample <- rep(NA, n)
+count <- 0
+z <- make_z(x, hx, hpx, left_bound, right_bound) 
+lower_bound <- make_lower_bound(x, hx, left_bound, right_bound)
+upper_bound <- make_upper_bound(x, hx, hpx, z)
+cand <- sample_upper_bound(n - count, x, hx, hpx, z)
+cand_filtered <- filter(cand, lower_bound, upper_bound)
+
+# Basically, we have our candidates and cand_filtered
+cand
+cand_filtered
+
+@
+
+<<updatesample>>=
+update_sample <- function(sample, accepted, update, count, f, upper_bound, ...) {
+  w <- runif(1)
+  flag <- (log(w) < log(f(update, ...))/upper_bound(update))
+  if (is.na(accepted[1])) {
+    if (flag) sample[(count+1)] <- update
+  }
+  else {
+    k <- length(accepted)
+    if (flag) {
+      sample[(count+1):(count+1+k)] <- c(accepted, update)
+    }
+    else {
+      sample[(count+1):(count+k)] <- c(accepted)
+    }
+  }
+  return(sample)
+}
+
+f<-dnorm
+hx <- log(f(x))
+hpx <- h_prime(hx, x)
+sample <- c(1,2,3, rep(NA, 10))
+accepted <- c(4,5,6)
+update <- 7
+count <- length(na.omit(sample))
+upper_bound <- make_upper_bound(x, hx, hpx, z)
+update_sample(sample, accepted, update, count, f, upper_bound)
+accepted <- NA
+update_sample(sample, accepted, update, count, f, upper_bound)
+
+@
+
+<<updatex>>=
+update_x <- function(f, x, hx, hpx, update, ...) {
+  if (is.na(update)){
+    return (list(x=x, hx=hx, hpx=hpx))
+  }
+  else {
+    hx_update <- log(f(update, ...))
+    xx <- update
+    hpx_update <- attributes(numericDeriv(quote(log(f(xx, ...))), "xx"))$gradient[1, 1]
+    rank_x <- rank(c(x, update))
+    new_x <- rep(NA, length(x)+1)
+    new_hx <- rep(NA, length(x)+1)
+    new_hpx <- rep(NA, length(x)+1)
+    
+    new_x[rank_x] <- c(x, update)
+    new_hx[rank_x] <- c(hx, hx_update)
+    new_hpx[rank_x] <- c(hpx, hpx_update)
+    
+    #Check concaveness by testing if h'(x) is decreasing
+    if (is.unsorted(-new_hpx)) stop("The sample function is not log-concaved!")
+    
+    return(list(x=new_x, hx=new_hx, hpx=new_hpx))
+  }
+}
+
+@
+I did not come up with a good test for this one, need discussion.
+
+
+<<ARS>>=
+ars <- function(f, n, left_bound = -Inf, right_bound = Inf, x_init, ...) {
+  #Generating the initial abscissaes x
+  x <- x_init
+  hx <- log(f(x, ...))
+  hpx <- diag(attributes(numericDeriv(quote(log(f(x, ...))), "x"))$gradient)
+  if (((hpx[1] < 0) & (left_bound==-Inf)) | ((hpx[length(hpx)]>0) & (right_bound==Inf))) stop("The derivatie at the first/last initial point must be positive/negative")
+  sample <- rep(NA, n)
+  count <- 0
+  z <- make_z(x, hx, hpx, left_bound, right_bound) 
+
+  while (count < n) {
+    #Make the lower_bound, upper bound functions
+    lower_bound <- make_lower_bound(x, hx, left_bound, right_bound)
+    upper_bound <- make_upper_bound(x, hx, hpx, z)
+    
+    #Draw samples from the upper bound function
+    cand <- sample_upper_bound(n - count, x, hx, hpx, z)
+    
+    #"update" records the first point in the sample that can not be accepted based on lowerbound
+    #"accepted" records the candidates drawn from upper_bound function that are accepted by only using the lowerbound until the "update" point
+    cand_filtered <- filter(cand, lower_bound, upper_bound)
+    accepted <- cand_filtered$accepted
+    update <- cand_filtered$update
+    
+    if (is.na(update)) {
+      sample[(count+1):n] <- accepted
+      return(sample)
+    }
+    
+    #Check the log-concaveness by checking if the log(f(update)) falls in between lower and upper bound function 
+    if ((log(f(update, ...)) < lower_bound(update)) | (log(f(update, ...)) > upper_bound(update))) stop("The sample function is not log-concaved!")
+    
+    #Update the sample using cand_filtered
+    sample <- update_sample(sample, accepted, update, count, f, upper_bound, ...)
+    count <- length(na.omit(sample))
+    
+    #Update the abscissaes x
+    update_absci <- update_x(f, x, hx, hpx, update, ...)
+    x <- update_absci$x
+    hx <- update_absci$hx
+    hpx <- update_absci$hpx
+    z <- make_z(x, hx, hpx, left_bound, right_bound)
+  }
+  return (sample)
+}
+
+# Beautiful Plot!!!
+set.seed(0)
+hist(ars(dnorm, 2000, x_init = c(-1,1)), main = "ARS sampling from a truncated normal distribution")
+
+# The following has some problems that we may need to fix.
+hist(ars(dnorm, 2000, left_bound = -Inf, right_bound = Inf, x_init = runif(1)), main = "ARS sampling from a normal distribution")
+
+# qqplot
+ars_sample <- ars(dnorm, 2000, x_init=c(-1,1))
+qqnorm(ars_sample)
+qqline(ars_sample)
+
+#Test for extra arguments
+ars_sample <- ars(dnorm, 2000, x_init=c(1,3), mean = 2, sd = 5)
+qqnorm(ars_sample)
+qqline(ars_sample)
+
+#Test for bounded distribution
+ars_sample <- ars(dnorm, 2000, left_bound=-2, right_bound=2,x_init=c(-1,1))
+hist(ars_sample)
+
+#To check if it can catch bad initial points
+ars_sample <- ars(dnorm, 2000, x_init=c(1,2))
+ars_sample <- ars(dnorm, 2000, left_bound=0.1, x_init=c(1,2))
+hist(ars_sample)
+
+#To check if it can catch non-log-concaveness
+ars_sample <- ars(dexp, 2000, -2, 2, x_init=rnorm(10))
+# It should return that dexp is not log-concaved. Need further revision
+@
+The plot says everything!
+
+
+\end{document}
